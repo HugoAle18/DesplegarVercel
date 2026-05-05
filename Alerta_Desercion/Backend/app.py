@@ -11,7 +11,7 @@ app = FastAPI(
     description="Sistema predictivo de deserción estudiantil"
 )
 
-# 2. Configuración CORS (Obligatorio para conectar con Vercel)
+# 2. Configuración CORS (Permite la conexión desde tu HTML local o Vercel)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], 
@@ -29,7 +29,7 @@ try:
 except Exception as e:
     print(f"❌ Error al cargar los modelos: {e}")
 
-# 4. Definir la estructura de entrada
+# 4. Definir la estructura de entrada de datos
 class EstudianteData(BaseModel):
     aprobados_s1: float
     nota_s1: float
@@ -47,34 +47,41 @@ class EstudianteData(BaseModel):
     cursos_s1: float
     cursos_s2: float
 
-# 5. Endpoint de Predicción (Con el modelo real)
+# 5. Endpoint de Predicción con Escudo Anti-Errores
 @app.post("/predecir_riesgo")
 def predecir(data: EstudianteData):
     try:
-        # Calcular variables derivadas (Tu ingeniería de características)
-        aprobacion_rate_1 = data.aprobados_s1 / data.cursos_s1 if data.cursos_s1 > 0 else 0
-        aprobacion_rate_2 = data.aprobados_s2 / data.cursos_s2 if data.cursos_s2 > 0 else 0
-        variacion_rendimiento = data.nota_s2 - data.nota_s1
-        carga_total = data.cursos_s1 + data.cursos_s2
-        riesgo_financiero = (data.pago_al_dia == 0) + (data.deudor == 1) + (data.becado == 0)
-        ratio_notas = data.nota_s2 / (data.nota_s1 + 1e-5)
-        estres_academico = carga_total / (data.edad + 1)
+        # --- PROCESAMIENTO SEGURO DE DATOS ---
+        # Forzamos conversión a float y evitamos divisiones por cero
+        c1 = float(data.cursos_s1) if data.cursos_s1 > 0 else 1.0
+        c2 = float(data.cursos_s2) if data.cursos_s2 > 0 else 1.0
+        n1 = float(data.nota_s1)
+        n2 = float(data.nota_s2)
 
-        # Empaquetar todo como lo espera el modelo
+        # Ingeniería de variables (Igual a como entrenaste el modelo)
+        aprobacion_rate_1 = float(data.aprobados_s1) / c1
+        aprobacion_rate_2 = float(data.aprobados_s2) / c2
+        variacion_rendimiento = n2 - n1
+        carga_total = c1 + c2
+        riesgo_financiero = float((data.pago_al_dia == 0) + (data.deudor == 1) + (data.becado == 0))
+        ratio_notas = n2 / (n1 + 0.001)
+        estres_academico = carga_total / (float(data.edad) + 1.0)
+
+        # Crear diccionario con las 20 columnas exactas requeridas
         input_dict = {
-            'Curricular units 1st sem (approved)': [data.aprobados_s1],
-            'Curricular units 1st sem (grade)': [data.nota_s1],
-            'Curricular units 2nd sem (approved)': [data.aprobados_s2],
-            'Curricular units 2nd sem (grade)': [data.nota_s2],
-            'Tuition fees up to date': [data.pago_al_dia],
-            'Debtor': [data.deudor],
-            'Scholarship holder': [data.becado],
-            'Age at enrollment': [data.edad],
-            'Displaced': [data.desplazado],
-            'Gender': [data.genero],
-            'GDP': [data.pbi],
-            'Unemployment rate': [data.desempleo],
-            'Inflation rate': [data.inflacion],
+            'Curricular units 1st sem (approved)': [float(data.aprobados_s1)],
+            'Curricular units 1st sem (grade)': [n1],
+            'Curricular units 2nd sem (approved)': [float(data.aprobados_s2)],
+            'Curricular units 2nd sem (grade)': [n2],
+            'Tuition fees up to date': [int(data.pago_al_dia)],
+            'Debtor': [int(data.deudor)],
+            'Scholarship holder': [int(data.becado)],
+            'Age at enrollment': [float(data.edad)],
+            'Displaced': [int(data.desplazado)],
+            'Gender': [int(data.genero)],
+            'GDP': [float(data.pbi)],
+            'Unemployment rate': [float(data.desempleo)],
+            'Inflation rate': [float(data.inflacion)],
             'aprobacion_rate_1': [aprobacion_rate_1],
             'aprobacion_rate_2': [aprobacion_rate_2],
             'variacion_rendimiento': [variacion_rendimiento],
@@ -84,18 +91,17 @@ def predecir(data: EstudianteData):
             'estres_academico': [estres_academico]
         }
 
-        # Convertir y preprocesar
+        # Convertir a DataFrame manteniendo el orden de las columnas
         df_input = pd.DataFrame(input_dict)
-        features_order = list(input_dict.keys())
-        df_input = df_input[features_order]
-
-        X_input = imputer.transform(df_input)
-        X_input = scaler.transform(X_input)
-
-        # Predecir usando el MLP
-        proba = mlp.predict_proba(X_input)[0][1]
         
-        # Lógica de niveles
+        # Aplicar Transformaciones (Imputer -> Scaler)
+        X_transformed = imputer.transform(df_input)
+        X_final = scaler.transform(X_transformed)
+
+        # Ejecutar Inferencia con el MLP
+        proba = float(mlp.predict_proba(X_final)[0][1])
+        
+        # Definición de niveles de alerta
         if proba >= 0.70:
             nivel = "CRÍTICO"
         elif proba >= 0.40:
@@ -103,12 +109,14 @@ def predecir(data: EstudianteData):
         else:
             nivel = "BAJO"
 
-        # DEVOLVER LA ESTRUCTURA EXACTA QUE ESPERA TU FRONTEND
+        # Respuesta final para el Frontend
         return {
             "probabilidad_desercion_pct": round(proba * 100, 2),
-            "alerta": int(proba >= 0.40),
-            "nivel_riesgo": nivel
+            "nivel_riesgo": nivel,
+            "status": "success"
         }
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        # Log interno para depuración en Render
+        print(f"⚠️ Error en predicción: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error interno del modelo: {str(e)}")
